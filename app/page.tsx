@@ -429,7 +429,7 @@ export default function GhostJobChecker() {
                 </p>
               </div>
 
-              {/* Job Description  DEPRECATED FOR NOW*/}
+              {/* Job Description
               <div>
                 <label
                   htmlFor="job-description"
@@ -451,6 +451,7 @@ export default function GhostJobChecker() {
                   application process, etc.
                 </p>
               </div>
+              */}
 
               {/* Error Message */}
               {fetchError && (
