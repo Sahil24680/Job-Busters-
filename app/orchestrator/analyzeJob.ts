@@ -1,7 +1,7 @@
 // Main orchestrator that coordinates scraper, NLP, scoring, and DB
 
 import { scrapeJobFromUrl } from "@/app/other/scraper";
-import { getJobByCompositeKey, insertIntoJobTable, InsertStructuredJobFeatures, InsertToJobUpdatesTable, getJobUpdateTimestamps, createJobSnapshot, getLatestSnapshotForJob } from "@/utils/supabase/action";
+import { getJobByCompositeKey, insertIntoJobTable, InsertStructuredJobFeatures, InsertToJobUpdatesTable, getJobUpdateTimestamps, createJobSnapshot, getLatestSnapshotForJob, getAllSnapshotsForJob } from "@/utils/supabase/action";
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { analyzeAdapterJob, Combined } from "@/app/api/data-ingestion/nlp/client";
 import { analysisWithLLM } from "@/app/api/data-ingestion/nlp/index";
@@ -9,7 +9,7 @@ import { scoreJob, type AtsJobInput, type AtsJobFeatures } from "@/app/scoring/s
 import type { analysis } from "@/app/api/data-ingestion/nlp/index";
 import { parseGreenhouseTenantAndJob } from "@/app/api/data-ingestion/adapters/util";
 import type { AdapterJob } from "@/app/api/data-ingestion/adapters/types";
-import { createSnapshotData, hasContentChanged } from "@/app/db/jobSnapshots";
+import { createSnapshotData, hasContentChanged, hasAtsUpdatedAtChanged } from "@/app/db/jobSnapshots";
 
 export type Tier = "Low" | "Medium" | "High";
 
@@ -137,20 +137,37 @@ function generateRecommendations(breakdown: Record<string, number>): string[] {
     }
   }
   
-  // Update cadence and freshness recommendations (check for combined case first)
+  // Update cadence, content change quality, and freshness recommendations
   const hasPredictableCadence = breakdown.update_cadence !== undefined && breakdown.update_cadence < 0.5;
+  const hasStaleRefreshPattern = breakdown.content_change_quality !== undefined && breakdown.content_change_quality < 0.5;
   const hasStalePosting = breakdown.freshness < 0.5;
   
-  if (hasPredictableCadence && hasStalePosting) {
-    // Combined message when both flags are present
+  // Triple combination: cadence + stale refresh + stale posting
+  if (hasPredictableCadence && hasStaleRefreshPattern && hasStalePosting) {
+    recommendations.push("This job refreshes in a predictable pattern with no significant content changes, and it is a stale posting. These three signals combined strongly indicate automated efforts to make a ghost job appear active.");
+  }
+  // Double combination: cadence + stale refresh (amplified signal)
+  else if (hasPredictableCadence && hasStaleRefreshPattern) {
+    recommendations.push("This job refreshes in a predictable pattern with no significant content changes. These two signals combined indicate automated efforts to make a ghost job appear active.");
+  }
+  // Double combination: cadence + stale posting
+  else if (hasPredictableCadence && hasStalePosting) {
     recommendations.push("This job is both stale and refreshes in a predictable pattern. These two signals combined is a stronger signal of automated efforts to make a ghost job appear active.");
-  } else {
-    // Individual messages
+  }
+  // Double combination: stale refresh + stale posting
+  else if (hasStaleRefreshPattern && hasStalePosting) {
+    recommendations.push("This job refreshes without significant content changes and is a stale posting. This pattern suggests the job may be reposted to appear active without real updates.");
+  }
+  // Individual messages
+  else {
     if (hasStalePosting) {
       recommendations.push("This posting may be stale. Verify the position is still actively hiring (posted >30 days ago).");
     }
     if (hasPredictableCadence) {
       recommendations.push("This job refreshes in a predictable pattern, which could indicate automated efforts to make a ghost job appear active.");
+    }
+    if (hasStaleRefreshPattern) {
+      recommendations.push("This job refreshes without significant content changes, which could indicate automated reposting to make a ghost job appear active.");
     }
   }
   
@@ -298,20 +315,20 @@ export async function analyzeJob(
           await createJobSnapshot(supabase, newSnapshotData);
           console.log(`[analyzeJob] Created first snapshot for new ATS job: ${jobId}`);
         } else {
-          //Existing job: Check if content changed before creating snapshot
+          //Existing job: Check if ats_updated_at changed
           const latestSnapshot = await getLatestSnapshotForJob(supabase, jobId);
           
           if (!latestSnapshot) {
             //Job exists but no snapshot yet - create one
             await createJobSnapshot(supabase, newSnapshotData);
             console.log(`[analyzeJob] Created first snapshot for existing ATS job: ${jobId}`);
-          } else if (hasContentChanged(latestSnapshot, newSnapshotData)) {
-            //Content changed - create new snapshot
+          } else if (hasAtsUpdatedAtChanged(latestSnapshot, adapterJob.updated_at)) {
+            //ats_updated_at changed - create new snapshot
             await createJobSnapshot(supabase, newSnapshotData);
-            console.log(`[analyzeJob] Job content changed - created new snapshot for: ${jobId}`);
+            const contentChanged = hasContentChanged(latestSnapshot, newSnapshotData);
+            console.log(`[analyzeJob] ATS updated_at changed - created snapshot for: ${jobId}${contentChanged ? ' (content also changed)' : ' (no content change)'}`);
           } else {
-            //No changes detected - no snapshot needed
-            console.log(`[analyzeJob] No content changes detected for: ${jobId}`);
+            console.log(`[analyzeJob] ATS updated_at unchanged, skipping snapshot for: ${jobId}`);
           }
         }
         
@@ -362,11 +379,23 @@ export async function analyzeJob(
 
     // 5. Fetch update cadence data for ATS jobs (only if job exists in DB)
     let updateCadenceData: string[] | undefined = undefined;
+    let snapshotData: Array<{ content_simhash: string; metadata_simhash: string }> | undefined = undefined;
+    
     if (ats_provider !== "web" && jobId) {
       updateCadenceData = await getJobUpdateTimestamps(supabase, jobId);
       // Only include if we have at least 4 updates (baseline for pattern detection)
       if (updateCadenceData.length < 4) {
         updateCadenceData = undefined; // Not enough data, don't include in scoring
+      }
+      
+      // Fetch snapshot data (for content change quality analysis)
+      const snapshots = await getAllSnapshotsForJob(supabase, jobId);
+      // Only include if we have at least 2 snapshots (need at least 2 to compare)
+      if (snapshots.length >= 2) {
+        snapshotData = snapshots.map(s => ({
+          content_simhash: s.content_simhash,
+          metadata_simhash: s.metadata_simhash
+        }));
       }
     }
 
@@ -386,7 +415,8 @@ export async function analyzeJob(
         buzzwords: nlpAnalysis.buzzwords,
         comp_period_detected: nlpAnalysis.comp_period_detected
       },
-      update_cadence_data: updateCadenceData
+      update_cadence_data: updateCadenceData,
+      snapshot_data: snapshotData
     };
 
     // 7. Score the job

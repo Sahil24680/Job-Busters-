@@ -165,3 +165,66 @@ export function hasContentChanged(
     oldSnapshot.metadata_hash !== newSnapshot.metadata_hash
   );
 }
+
+/**
+ * Check if ats_updated_at timestamp has changed between two snapshots
+ * returns: true if ats_updated_at differs
+ */
+export function hasAtsUpdatedAtChanged(
+  oldSnapshot: dbJobSnapshot | null,
+  newAtsUpdatedAt: string | null
+): boolean {
+  if (!oldSnapshot) return true; // No previous snapshot, change
+  if (!oldSnapshot.ats_updated_at && !newAtsUpdatedAt) return false; // Both null, no change
+  if (!oldSnapshot.ats_updated_at || !newAtsUpdatedAt) return true; // One is null, other isn't, change
+  return oldSnapshot.ats_updated_at !== newAtsUpdatedAt;
+}
+
+/**
+ * Calculate Hamming distance between two simhashes
+ * 
+ * @param simhash1 - First simhash as string
+ * @param simhash2 - Second simhash as string
+ * @returns Hamming distance
+ */
+export function simhashHammingDistance(simhash1: string, simhash2: string): number {
+  try {
+    const hash1 = BigInt(simhash1);
+    const hash2 = BigInt(simhash2);
+    const xor = hash1 ^ hash2;
+    
+    // Count set bits in XOR result
+    let distance = 0;
+    let temp = xor;
+    while (temp > BigInt(0)) {
+      if (temp & BigInt(1)) distance++;
+      temp = temp >> BigInt(1);
+    }
+    return distance;
+  } catch (error) {
+    console.error('[simhashHammingDistance] Error calculating distance:', error);
+    return 64; // Max distance on error
+  }
+}
+
+/**
+ * Determine if simhash change is "significant" based on Hamming distance
+ * 
+ * For 64-bit simhashes:
+ * - Distance 0-10: Very similar
+ * - Distance 11-20: Somewhat similar
+ * - Distance 21-64: Significantly different
+ * 
+ * @param oldSimhash - Previous simhash
+ * @param newSimhash - New simhash
+ * @param threshold - Hamming distance threshold (default: 10)
+ * @returns true if change is significant
+ */
+export function isSimhashChangeSignificant(
+  oldSimhash: string,
+  newSimhash: string,
+  threshold: number = 10
+): boolean {
+  const distance = simhashHammingDistance(oldSimhash, newSimhash);
+  return distance > threshold;
+}

@@ -8,6 +8,8 @@
 // available breakdown values. This guarantees that non-zero breakdowns cannot
 // produce an overall score of 0.
 
+import { isSimhashChangeSignificant } from "@/app/db/jobSnapshots";
+
 export type SalarySource = "metadata" | "content" | "jsonld" | "text" | "both" | "unknown";
 export type CompPeriod = "hour" | "year" | "month" | "week" | "day" | "unknown";
 
@@ -44,6 +46,9 @@ export interface AtsJobInput {
   
   // Update cadence data (optional, only for ATS jobs with sufficient history)
   update_cadence_data?: string[]; // Array of ats_updated_at timestamps from job_updates table
+  
+  // Snapshot data for content change analysis
+  snapshot_data?: Array<{ content_simhash: string; metadata_simhash: string }>; // Array of snapshots with simhashes
 }
 
 export interface WebFeaturesInput {
@@ -72,23 +77,23 @@ export interface ScoreWeights {
   skills_present: number;
   buzzword_penalty: number;
   comp_period_clarity: number;
-  // Update cadence
   update_cadence: number;
+  content_change_quality: number;
 }
 
 // Sensible defaults; override per-call if needed
 export const DEFAULT_WEIGHTS: ScoreWeights = {
-  freshness: 0.18,
-  link_integrity: 0.10,
-  salary_disclosure: 0.23,
-  salary_min_present: 0.14,
-  source_credibility: 0.10,
+  freshness: 0.16,
+  link_integrity: 0.09,
+  salary_disclosure: 0.21,
+  salary_min_present: 0.13,
+  source_credibility: 0.09,
   // NLP signals
-  skills_present: 0.10,
-  buzzword_penalty: 0.05,
-  comp_period_clarity: 0.05,
-  // Update cadence (reduced other weights slightly to fit)
+  skills_present: 0.09,
+  buzzword_penalty: 0.04,
+  comp_period_clarity: 0.04,
   update_cadence: 0.05,
+  content_change_quality: 0.05,
 };
 
 export interface ScoreResult {
@@ -251,7 +256,7 @@ function featureUpdateCadence(updateTimestamps?: string[]): number {
     .sort((a, b) => a - b);
 
   if (sorted.length < 4) {
-    return 0.5; // After filtering invalid dates, still not enough
+    return 0.5;
   }
 
   // Calculate intervals between consecutive updates (in days)
@@ -286,6 +291,89 @@ function featureUpdateCadence(updateTimestamps?: string[]): number {
     const normalized = (coefficientOfVariation - 0.2) / (0.5 - 0.2);
     return clamp01(normalized);
   }
+}
+
+/**
+ * Content change quality: analyzes if job refreshes include significant content changes.
+ * - Returns 0.5 (neutral) if < 2 snapshots (insufficient data)
+ * - Returns 1.0 (good) if most refreshes include significant changes
+ * - Returns 0.0 (bad) if most refreshes have no significant changes
+ */
+function featureContentChangeQuality(
+  snapshotData?: Array<{ content_simhash: string; metadata_simhash: string }>,
+  updateCadenceScore?: number
+): number {
+  if (!snapshotData || snapshotData.length < 2) {
+    return 0.5; // Not enough data: neutral
+  }
+
+  // Track significant changes between consecutive snapshots
+  let significantChanges = 0;
+  let totalComparisons = 0;
+  const seenSimhashes = new Map<string, number>();
+
+  // Compare consecutive snapshots
+  for (let i = 1; i < snapshotData.length; i++) {
+    const prev = snapshotData[i - 1];
+    const curr = snapshotData[i];
+    
+    // Check both content and metadata simhashes
+    const contentChanged = isSimhashChangeSignificant(
+      prev.content_simhash,
+      curr.content_simhash
+    );
+    const metadataChanged = isSimhashChangeSignificant(
+      prev.metadata_simhash,
+      curr.metadata_simhash
+    );
+    
+    // Significant change if either content or metadata changed significantly
+    if (contentChanged || metadataChanged) {
+      significantChanges++;
+    }
+    totalComparisons++;
+    
+    // Track simhash occurrences
+    const contentKey = curr.content_simhash;
+    const metadataKey = curr.metadata_simhash;
+    seenSimhashes.set(contentKey, (seenSimhashes.get(contentKey) || 0) + 1);
+    seenSimhashes.set(metadataKey, (seenSimhashes.get(metadataKey) || 0) + 1);
+  }
+
+  if (totalComparisons === 0) {
+    return 0.5; // No comparisons made
+  }
+
+  // Calculate proportion of significant changes
+  const changeRatio = significantChanges / totalComparisons;
+  
+  // Count unique vs duplicate simhashes
+  let uniqueHashes = 0;
+  let duplicateHashes = 0;
+  seenSimhashes.forEach((count) => {
+    if (count === 1) {
+      uniqueHashes++;
+    } else {
+      duplicateHashes += count;
+    }
+  });
+
+  // Base score: proportion of significant changes
+  let baseScore = changeRatio;
+
+  const totalHashes = uniqueHashes + duplicateHashes;
+  const duplicateRatio = totalHashes > 0 ? duplicateHashes / totalHashes : 0;
+  
+  if (duplicateRatio > 0.5) {
+    baseScore *= (1 - duplicateRatio * 0.5); // Reduce by up to 25% for high duplication
+  }
+
+  // Amplification with update cadence
+  if (updateCadenceScore !== undefined && updateCadenceScore < 0.3 && baseScore < 0.3) {
+    baseScore = baseScore * 0.8; 
+  }
+
+  return clamp01(baseScore);
 }
 
 // --- Aggregator (hardened) ---------------------------------------------------
@@ -361,8 +449,19 @@ export function scoreJob(
   breakdown.comp_period_clarity = featureCompPeriodClarity(input.nlp_analysis);
 
   // Update cadence (only for ATS jobs with update history)
+  let updateCadenceScore: number | undefined = undefined;
   if (input.update_cadence_data) {
-    breakdown.update_cadence = featureUpdateCadence(input.update_cadence_data);
+    updateCadenceScore = featureUpdateCadence(input.update_cadence_data);
+    breakdown.update_cadence = updateCadenceScore;
+  }
+
+  // Content change quality
+  // Pass updateCadenceScore for signal amplification
+  if (input.snapshot_data) {
+    breakdown.content_change_quality = featureContentChangeQuality(
+      input.snapshot_data,
+      updateCadenceScore
+    );
   }
 
   const score = finalizeScore(breakdown, weights ?? DEFAULT_WEIGHTS);

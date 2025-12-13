@@ -182,10 +182,10 @@ export async function insertIntoJobTable(supabase: SupabaseClient, jobDetails: A
   requisition_id,
   content,
   raw_json,
-} = jobDetails //jobFeatures is not in the jobs table so take it out
+} = jobDetails
 
 const jobInsert = {
-  ats: ats_provider, // ats_provider in database
+  ats: ats_provider,
   tenant_slug,
   external_job_id,
   title,
@@ -334,7 +334,7 @@ export async function getJobUpdateTimestamps(
     .from("job_updates")
     .select("ats_updated_at")
     .eq("job_id", jobId)
-    .order("ats_updated_at", { ascending: false }) // Most recent first
+    .order("ats_updated_at", { ascending: false })
     .limit(50); // Limit to latest 50 entries (enough to detect patterns)
 
   if (error) {
@@ -599,5 +599,30 @@ export async function getLatestSnapshotForJob(
   }
 
   return data;
+}
+
+/**
+ * Get all snapshots for a specific job, ordered chronologically
+ * 
+ * @param supabase - Supabase client
+ * @param jobId - Job ID to fetch snapshots for
+ * @returns Array of snapshots ordered by snapshot_at (oldest first)
+ */
+export async function getAllSnapshotsForJob(
+  supabase: SupabaseClient,
+  jobId: string
+): Promise<dbJobSnapshot[]> {
+  const { data, error } = await supabase
+    .from('job_snapshots')
+    .select('*')
+    .eq('job_id', jobId)
+    .order('snapshot_at', { ascending: true }); // Oldest first for chronological analysis
+
+  if (error) {
+    console.error('[getAllSnapshotsForJob] Error fetching snapshots:', error);
+    return [];
+  }
+
+  return data || [];
 }
 
