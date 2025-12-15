@@ -27,7 +27,7 @@
         "./*"
       ]
     },
-    "types": []
+    "types": ["jest"]
   },
   "include": [
     "**/*.ts",

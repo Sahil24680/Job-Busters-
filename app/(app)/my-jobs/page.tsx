@@ -1,4 +1,4 @@
-// app/my-jobs/page.tsx
+// app/(app)/ my-jobs/page.tsx
 
 "use client";
 
@@ -6,22 +6,8 @@ import { useRouter } from "next/navigation";
 import React, { useState, useEffect } from "react";
 import { toast } from "react-toastify";
 import { Briefcase, DollarSign, MapPin, Calendar, Trash2, ExternalLink, Filter, Menu, X, Home, BarChart3, Settings, HelpCircle, User } from "lucide-react";
-import { logout } from "@/utils/supabase/action";
+import { useSubtitle } from "../AppLayoutClientWrapper";
 
-type UserInfo = {
-  fullName: string | null;
-  email: string | null;
-};
-
-type UserApiResponse = {
-    success: boolean;
-    user?: {
-        id: string;
-        email: string | null;
-        fullName: string | null;
-    };
-    error?: string;
-}
 
 type JobFeatures = {
   salary_min: number | null;
@@ -52,22 +38,19 @@ type FilterType = "all" | "greenhouse" | "web";
 
 export default function MyJobsPage() {
   const router = useRouter();
-
-  const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
+  const setHeaderSubtitle = useSubtitle(); // to set subtitle in header 
 
   const [jobs, setJobs] = useState<SavedJob[]>([]);
   const [jobToDelete, setJobToDelete] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [filterType, setFilterType] = useState<FilterType>("all");
-  const [filterDepartment, setFilterDepartment] = useState<string>("all");
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [filterDepartment, setFilterDepartment] = useState<string>("all"); 
 
-  async function handleLogout() {
-      setIsLoggingOut(true);
-      const result = await logout();
-    }
+  useEffect(() => {
+      setHeaderSubtitle("Track and manage your saved jobs");
+      return () => setHeaderSubtitle(null);
+  }, [setHeaderSubtitle]);
 
   useEffect(() => {
     let cancelled = false;
@@ -106,34 +89,6 @@ export default function MyJobsPage() {
             cancelled = true;
         };
         }, []);
-
-  useEffect(() => {
-      const fetchUser = async () => {
-          try {
-              // 1. Fetch data from user API route
-              const res = await fetch("/api/user");
-              const data: UserApiResponse = await res.json();
-
-              // 2. Handle non-success response 
-              if (!res.ok || !data.success || !data.user) {
-                  console.error("[MyJobsPage] Failed to fetch user profile:", data.error || res.statusText);
-                  // don't show user info.
-                  return;
-              }
-
-              // 3. Set the state with data
-              setUserInfo({
-                  fullName: data.user.fullName ?? null,
-                  email: data.user.email ?? null,
-              });
-
-          } catch (err) {
-              console.error("[MyJobsPage] Network error fetching user profile:", err);
-          }
-      };
-
-      fetchUser();
-  }, []);
 
 const handleUnsave = (jobId: string) => {
   setJobToDelete(jobId);
@@ -231,119 +186,17 @@ const confirmDelete = async () => {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-orange-50 to-white flex items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-12 h-12 border-4 border-orange-600 border-t-transparent rounded-full animate-spin" />
-          <p className="text-gray-600">Loading your jobs...</p>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-orange-50 to-white">
-      {sidebarOpen && (
-        <div
-          className="fixed inset-0 z-40 bg-black/30 backdrop-blur-[1px] transition-opacity"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
-
-      <aside className={`fixed top-0 left-0 h-full w-64 bg-slate-900 text-white z-50 transform transition-transform duration-300 ease-in-out ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`} >
-        <div className="flex items-center justify-between p-6 border-b border-slate-800">
-          <h2 className="text-xl font-bold">
-            <span className="text-orange-500">Job</span> Busters
-          </h2>
-          <button onClick={() => setSidebarOpen(false)} 
-            className="p-1 hover:bg-slate-800 rounded"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <nav className="p-4 space-y-2">
-
-          <button
-            onClick={() => {
-                setSidebarOpen(false)
-                router.push("/")
-            }}
-            className="w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-slate-800 transition-colors text-slate-300 hover:text-white text-left"
-          >
-            <Home className="w-5 h-5" />
-            <span className="font-medium">Analyze Jobs</span>
-          </button>
-
-          <button
-            onClick={() => {
-                setSidebarOpen(false)
-                router.push("/my-jobs")
-            }}
-            className="w-full flex items-center gap-3 px-4 py-3 rounded-lg bg-orange-600 text-white text-left"
-          >
-            <Briefcase className="w-5 h-5"/>
-            <span className="font-medium">My Jobs</span>
-          </button>
-        </nav>
-
-        {/* User Profile Info */}
-        <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-slate-800">
-          <div className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-slate-800 transition-colors cursor-pointer">
-            <div className="w-10 h-10 rounded-full bg-orange-600 flex items-center justify-center">
-              <User className="w-5 h-5" />
-            </div>
-            <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-white truncate">
-                    {userInfo?.fullName || "Logged-in user"}
-                </p>
-                <p className="text-xs text-slate-400 truncate">
-                    {userInfo?.email || ""}
-                </p>
-            </div>
+      <div className="flex items-center justify-center p-20"> 
+          <div className="flex flex-col items-center gap-3">
+            <div className="w-12 h-12 border-4 border-orange-600 border-t-transparent rounded-full animate-spin" />
+            <p className="text-gray-600">Loading your jobs...</p>
           </div>
         </div>
-      </aside>
+      );
+    }
 
-
-        {/* Nav Bar  */}
-        <header className="sticky top-0 z-30 bg-white border-b border-orange-100 shadow-sm">
-          {/* center row */}
-            <div className="relative flex items-center justify-center h-16">
-                {/* menu to the left */}
-                <button
-                    onClick={() => setSidebarOpen(true)}
-                    className="absolute left-4 p-2 hover:bg-orange-50 rounded-lg transition-colors"
-                >
-                    <Menu className="w-6 h-6 text-gray-700" />
-                </button>
-
-                {/* center */}
-                <div className="flex flex-col items-center">
-                    <h1 className="text-2xl font-extrabold tracking-tight leading-tight">
-                    <span className="text-orange-600">Job</span>{" "}
-                    <span className="text-slate-900">Busters</span>
-                    </h1>
-                    <span className="text-xs text-gray-600">
-                    My Saved Jobs
-                    </span>
-                </div>
-
-            {/* logout to the right */}
-            <button
-              onClick={async () => {
-                setSidebarOpen(false); // Close sidebar 
-                await handleLogout();
-              }}
-              disabled={isLoggingOut} 
-              className="absolute right-4 px-4 py-2 bg-orange-600 text-white text-sm font-medium rounded-lg hover:bg-orange-700 transition-colors disabled:bg-gray-500 disabled:cursor-not-allowed"
-            >
-                {isLoggingOut ? "Logging out..." : "Logout"}
-            </button>
-        </div>
-        </header>
-
-        
-        <main className="max-w-screen-xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+  return (
+    <div className="max-w-screen-xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           <div className="mb-8">
             <h2 className="text-3xl font-bold text-gray-900 mb-2">My Saved Jobs</h2>
             <p className="text-gray-600">Track and manage jobs you have analyzed. {filteredJobs.length} {filteredJobs.length === 1 ? 'job' : 'jobs'} saved.</p>
@@ -509,7 +362,6 @@ const confirmDelete = async () => {
                 </div>
               </div>
           )}
-        </main>
-      </div>
+   </div>
   );
 }
