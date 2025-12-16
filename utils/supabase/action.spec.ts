@@ -8,6 +8,7 @@ import {
   release_request_lock,
 } from "./action";
 
+
 // mock redirect from next/navigation
 jest.mock("next/navigation", () => ({
   redirect: jest.fn(),
@@ -82,7 +83,7 @@ describe("actions", () => {
   test("updateName success", async () => {
     mockFrom.update.mockReturnThis();
     mockFrom.eq.mockResolvedValueOnce({ error: null });
-    const res = await updateName("u1", "John", "Doe");
+    const res = await updateName("John", "Doe");
     expect(res).toEqual({ success: true });
   });
 

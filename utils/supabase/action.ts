@@ -38,43 +38,21 @@ export async function updatePassword(newPassword: string) {
   return error ? { error } : { success: true };
 }
 
-export async function updateName(
-  userId: string,
-  firstName: string,
-  lastName: string
-) {
+export async function updateName(firstName: string | null, lastName: string | null) {
   const supabase = await createClient();
+
+  const { data: auth, error: authErr } = await supabase.auth.getUser();
+  if (authErr || !auth.user) return { success: false, error: "Not authenticated" };
 
   const { error } = await supabase
-    .from("profiles")
-    .update({ first_name: firstName.trim(), last_name: lastName.trim() })
-    .eq("id", userId);
-  return error ? { error } : { success: true };
-}
+    .from("users")
+    .update({
+      first_name: firstName?.trim() || null,
+      last_name: lastName?.trim() || null,
+    })
+    .eq("id", auth.user.id);
 
-export async function uploadProfilePicture(userId: string, file: File) {
-  const supabase = await createClient();
-
-  const fileExt = file.name.split(".").pop();
-  const filePath = `${userId}/${Date.now()}.${fileExt}`;
-  const { error: uploadError } = await supabase.storage
-    .from("profile-pictures")
-    .upload(filePath, file, {
-      upsert: true,
-      contentType: file.type,
-    });
-
-  if (uploadError) return { error: uploadError };
-  const { data } = supabase.storage
-    .from("profile-pictures")
-    .getPublicUrl(filePath);
-  const publicUrl = data?.publicUrl;
-
-  const { error: dbError } = await supabase
-    .from("profiles")
-    .update({ profile_picture: publicUrl })
-    .eq("id", userId);
-  return dbError ? { error: dbError } : { success: true, url: publicUrl };
+  return error ? { success: false, error: error.message } : { success: true };
 }
 
 export async function getUser() {
@@ -93,6 +71,148 @@ export async function getUser() {
     return { error: error.message };
   }
 }
+
+const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+
+const ExtensionTypes: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+};
+
+type UploadResult =
+  | { success: true; path: string }
+  | { success: false; error: string };
+
+function getFileValidation(file: File): string | null {
+  if (!(file instanceof File)) {
+    return "No file provided";
+  }
+
+  const allowedExtensionTypes = Object.keys(ExtensionTypes);
+  if (!allowedExtensionTypes.includes(file.type)) {
+    return `Unsupported file type. Allowed: ${allowedExtensionTypes.map(t => t.split('/')[1]).join(', ')}`;
+  }
+
+  if (file.size > MAX_FILE_SIZE) {
+    return `File too large (max ${MAX_FILE_SIZE / 1024 / 1024}MB)`;
+  }
+
+  return null; // Validation passed
+}
+
+export async function uploadProfilePicture(formData: FormData): Promise<UploadResult> {
+  const supabase = await createClient();
+
+  const { data: auth, error: authErr } = await supabase.auth.getUser();
+  if (authErr || !auth.user) {
+    return { success: false as const, error: authErr?.message || "Not authenticated" };
+  }
+
+  const file = formData.get("file");
+
+  if (!(file instanceof File)) {
+    // If 'file' is null or a string , it's not an instance of File.
+    return { success: false as const, error: "No valid file provided" };
+  }
+
+  // File Validation
+  const actualFile = file as File;
+  const validationError = getFileValidation(actualFile);
+  if (validationError) {
+    return { success: false as const, error: validationError };
+  }
+
+  // Determine File Path
+  const ext = ExtensionTypes[actualFile.type] || "jpg"; // Should not happen due to validation
+  const filePath = `${auth.user.id}/avatar.${ext}`;
+  const bucketName = "profile-pictures";
+
+  // Upload to Storage
+  const { error: uploadError } = await supabase.storage
+    .from(bucketName)
+    .upload(filePath, actualFile, {
+      upsert: true,
+      contentType: actualFile.type,
+      cacheControl: "3600",
+    });
+
+  if (uploadError) {
+    return { success: false as const, error: `Upload failed: ${uploadError.message}` };
+  }
+
+  // Update Database Path
+  const { error: dbError } = await supabase
+    .from("users")
+    .update({ profile_picture_path: filePath })
+    .eq("id", auth.user.id);
+
+  if (dbError) {
+    // Attempt to delete the file uploaded to prevent storage inconsistency
+    console.error(`DB Update failed for user ${auth.user.id}. Raw DB Error: ${dbError.message}. Attempting file cleanup.`);
+    await supabase.storage
+      .from(bucketName)
+      .remove([filePath])
+      .catch((e) => console.error("Cleanup failed:", e)); // Logging failure
+
+    return { success: false as const, error: "Profile update failed due to a system error. Please try again." };
+  }
+
+  return { success: true as const, path: filePath };
+}
+
+export type Profile = {
+  id: string;
+  email: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  created_at: string | null; 
+  profileUrl: string | null;  // link to image for browser 
+  profile_picture_path: string | null; //unique key for storage in supabase 
+};
+
+export async function getMyProfileSettings(): Promise<
+  | { success: true; profile: Profile }
+  | { success: false; error: string }
+> {
+  const supabase = await createClient();
+
+  const { data: auth, error: authErr } = await supabase.auth.getUser();
+  if (authErr || !auth.user) {
+    return { success: false, error: "Not authenticated" };
+  }
+
+  const { data: row, error } = await supabase
+    .from("users")
+    .select("created_at, email, first_name, last_name, profile_picture_path")
+    .eq("id", auth.user.id)
+    .maybeSingle();
+
+  if (error) return { success: false, error: error.message };
+
+  const profile_picture_path = row?.profile_picture_path ?? null;
+
+  let signedProfileUrl: string | null = null;
+  if (profile_picture_path) {
+    const { data: signed, error: signErr } = await supabase.storage
+      .from("profile-pictures")
+      .createSignedUrl(profile_picture_path, 60 * 60);
+
+    if (!signErr) signedProfileUrl = signed?.signedUrl ?? null;
+  }
+  const profile: Profile = {
+    id: auth.user.id,
+    email: auth.user.email ?? row?.email ?? null,
+    first_name: row?.first_name ?? null,
+    last_name: row?.last_name ?? null,
+    created_at: (row?.created_at as string | null) ?? null,
+    profile_picture_path,
+    profileUrl : signedProfileUrl,
+  };
+
+  return { success: true, profile };
+}
+
 
 export async function request_lock_and_tokens(userId: string) {
   const supabase = await createClient();
